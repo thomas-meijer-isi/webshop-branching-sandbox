@@ -1,0 +1,109 @@
+name: Backport audit
+
+# Answers "did every fix reach every supported version?" by comparing patch
+# CONTENT, not commit hashes -- so a cherry-pick counts as present even though
+# its SHA differs.
+#
+# The label check says what SHOULD happen. This says what DID.
+
+on:
+  schedule:
+    - cron: '0 5 * * 1-5'   # weekday mornings, before standup
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    name: Compare release branches against main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find commits on main that are missing downstream
+        id: audit
+        run: |
+          set -euo pipefail
+          report=$(mktemp)
+
+          for ref in $(git branch -r | grep -E 'origin/release/' | sed 's#\s*origin/##'); do
+            echo "## $ref" >> "$report"
+
+            # '+' = present on main, no equivalent patch on the release branch.
+            # git cherry matches by patch-id, so cherry-picks are detected.
+            missing=$(git cherry "origin/$ref" origin/main | grep '^+' | cut -d' ' -f2 || true)
+
+            if [ -z "$missing" ]; then
+              echo "  (nothing missing)" >> "$report"
+              echo >> "$report"
+              continue
+            fi
+
+            count=0
+            while read -r sha; do
+              [ -z "$sha" ] && continue
+
+              subject=$(git log -1 --format='%s' "$sha")
+
+              # Skip anything explicitly marked as not for backporting.
+              # Convention: the merge commit body carries the decision.
+              if git log -1 --format='%B' "$sha" | grep -qi 'no-backport'; then
+                continue
+              fi
+
+              # Only report things that look like fixes; features are expected
+              # to be missing from release branches.
+              case "$subject" in
+                fix*|Fix*|hotfix*|"revert"*) ;;
+                *) continue ;;
+              esac
+
+              echo "  - ${sha:0:8} $subject" >> "$report"
+              count=$((count + 1))
+            done <<< "$missing"
+
+            [ "$count" -eq 0 ] && echo "  (nothing missing)" >> "$report"
+            echo >> "$report"
+          done
+
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+          if grep -q '^  - ' "$report"; then
+            echo "gaps=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gaps=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo 'report<<REPORT_EOF'
+            cat "$report"
+            echo 'REPORT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue when fixes are missing
+        if: steps.audit.outputs.gaps == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.audit.outputs.report }}
+        run: |
+          set -euo pipefail
+          title="Backport audit: fixes missing from release branches"
+
+          existing=$(gh issue list --state open --label backport-audit \
+                       --json number --jq '.[0].number' || true)
+
+          body="These commits are on \`main\` but have no equivalent patch on the
+          release branch listed. Either backport them, or mark them
+          \`no-backport\` with a reason.
+
+          $REPORT"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label backport-audit
+          fi

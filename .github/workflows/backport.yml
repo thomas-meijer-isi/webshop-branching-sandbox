@@ -1,0 +1,48 @@
+name: Backport merged PR
+
+# On merge, open one cherry-pick PR per backport/<branch> label.
+# On conflict the PR is opened anyway, with markers and instructions.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write        # push the cherry-picked branch
+  pull-requests: write   # open the backport PR
+
+jobs:
+  backport:
+    name: Create backport PRs
+    runs-on: ubuntu-latest
+    # Only merged PRs that actually carry a backport/ label
+    if: >
+      github.event.pull_request.merged &&
+      contains(toJSON(github.event.pull_request.labels.*.name), '"backport/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create backport pull requests
+        uses: korthout/backport-action@v4
+        with:
+          # our labels are backport/4.7 -> capture group is the branch suffix
+          label_pattern: '^backport/(?<target>.+)$'
+          target_branches: ''
+          branch_name: backport/${target_branch}/${pull_number}
+          pull_title: '[${target_branch}] ${pull_title}'
+          pull_description: |
+            Automated cherry-pick of #${pull_number} onto `${target_branch}`.
+
+            **Before merging**
+            - [ ] The fix is already on `main` (it must land there first)
+            - [ ] Conflicts resolved and the change still makes sense on this branch
+            - [ ] A clean cherry-pick is not proof of correctness — check the
+                  surrounding code behaves the same way on this version
+
+            If this cannot be cherry-picked sensibly, close this PR and write the
+            fix directly against `${target_branch}` as its own PR. That is allowed.
+            What is *not* allowed is leaving the version unfixed because the pick
+            was awkward.
+          copy_assignees: true
+          copy_milestone: false
+          add_author_as_assignee: true

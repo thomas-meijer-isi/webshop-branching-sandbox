@@ -1,0 +1,111 @@
+name: Release
+
+# Tag a version from a release branch. Refuses to run if a backport PR for that
+# branch is still open -- shipping a version you know is missing a fix should
+# stop the release, not produce a warning nobody reads.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to tag, e.g. 4.7.3 (no leading v)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.check.outputs.branch }}
+    steps:
+      - name: Refuse if backports for this branch are still open
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          case "$REF" in
+            release/*) ;;
+            main) echo "::error::Tag releases from a release/* branch, not main."; exit 1 ;;
+            *) echo "::error::'$REF' is not a release branch."; exit 1 ;;
+          esac
+
+          # 4.7.3 must be tagged from release/4.7
+          minor="${VERSION%.*}"
+          if [ "$REF" != "release/$minor" ]; then
+            echo "::error::Version $VERSION does not belong on $REF (expected release/$minor)."
+            exit 1
+          fi
+
+          open=$(gh pr list --base "$REF" --state open \
+                   --json number,title,labels \
+                   --jq '.[] | select(.labels[].name | startswith("backport"))
+                         | "#\(.number) \(.title)"' || true)
+
+          if [ -n "$open" ]; then
+            {
+              echo "### Release blocked"
+              echo
+              echo "These backport PRs target \`$REF\` and are still open:"
+              echo
+              echo '```'
+              echo "$open"
+              echo '```'
+              echo
+              echo "Merge or close them before tagging $VERSION."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Open backport PRs target $REF."
+            exit 1
+          fi
+
+          echo "branch=$REF" >> "$GITHUB_OUTPUT"
+          echo "No open backports. Clear to tag $VERSION."
+
+  tag:
+    name: Tag and publish
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the annotated tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists."
+            exit 1
+          fi
+
+          git tag -a "v$VERSION" -m "Release v$VERSION from ${{ github.ref_name }}"
+          git push origin "v$VERSION"
+
+      # Build your artifact here, then attach it. Release assets do not expire;
+      # Actions artifacts do (90 days). For a per-install product the archived
+      # installer is often worth more than the ability to rebuild it later.
+      - name: Build
+        run: echo "replace with the real build"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            --target "${{ github.ref_name }}"
