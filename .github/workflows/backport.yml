@@ -80,8 +80,6 @@ jobs:
             Automated cherry-pick of #${pull_number} onto `${target_branch}`.
 
             **Before merging**
-            - [ ] The fix is already on `main` (it must land there first)
-            - [ ] Conflicts resolved and the change still makes sense on this branch
             - [ ] A clean cherry-pick is not proof of correctness -- check the
                   surrounding code behaves the same way on this version
 
