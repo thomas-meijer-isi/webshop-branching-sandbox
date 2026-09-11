@@ -62,6 +62,15 @@ jobs:
                            --json headRefName --jq '.[].headRefName' </dev/null \
                          | sed -n "s#^backport/${ref}/##p" | sort -u || true)
 
+            # Backport PRs still open for this branch. These commits stay in the
+            # report -- an open PR means the fix has NOT reached this branch --
+            # but the action is "merge #N", not "backport this", and a report
+            # that cannot tell those apart is a report nobody acts on.
+            open_prs=$(gh pr list --state open --base "$ref" --limit 200 \
+                         --json number,headRefName \
+                         --jq '.[] | "\(.headRefName) \(.number)"' </dev/null \
+                       | sed -n "s#^backport/${ref}/##p" | sort -u || true)
+
             # '+' = present on main, no equivalent patch on the release branch.
             missing=$(git cherry "origin/$ref" origin/main | grep '^+' | cut -d' ' -f2 || true)
 
@@ -127,7 +136,15 @@ jobs:
                 *) continue ;;
               esac
 
-              echo "  - ${sha:0:8} $subject" >> "$report"
+              # Flag an in-flight backport as in-flight. Reset per iteration --
+              # without this the note leaks onto the next commit reported.
+              note=""
+              if [ -n "$pr" ] && [ -n "$open_prs" ]; then
+                bp=$(printf '%s\n' "$open_prs" | awk -v p="$pr" '$1 == p {print $2}')
+                [ -n "$bp" ] && note="  <- backport PR #$bp open, not merged"
+              fi
+
+              echo "  - ${sha:0:8} $subject$note" >> "$report"
               count=$((count + 1))
             done <<< "$missing"
 
@@ -162,8 +179,8 @@ jobs:
                        --json number --jq '.[0].number' || true)
 
           body="These commits are on \`main\` but have no equivalent patch on the
-          release branch listed. Either backport them, or mark them
-          \`no-backport\` with a reason.
+          release branch listed. Either backport them, merge the open backport
+          PR noted beside them, or mark them \`no-backport\` with a reason.
 
           $REPORT"
 
