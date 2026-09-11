@@ -49,10 +49,15 @@ jobs:
           # label the PRs it opens, so the label test silently matched nothing and
           # the gate passed with backports still open. A branch name is also harder
           # to remove by accident than a label.
-          open=$(gh pr list --base "$REF" --state open \
+          # -R is required: this job does not check out the repository, so gh has
+          # no git remote to infer it from. Without it the command fails and, if
+          # its error is swallowed, the gate reports "no open backports" and
+          # clears the release. No '|| true' here for the same reason -- a query
+          # that cannot run must block the release, not wave it through.
+          open=$(gh pr list -R "$GITHUB_REPOSITORY" --base "$REF" --state open \
                    --json number,title,headRefName \
                    --jq '.[] | select(.headRefName | startswith("backport/"))
-                         | "#\(.number) \(.title)"' || true)
+                         | "#\(.number) \(.title)"')
 
           if [ -n "$open" ]; then
             {
