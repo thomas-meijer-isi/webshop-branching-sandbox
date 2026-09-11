@@ -1,0 +1,86 @@
+name: Backport audit
+
+# Reports fixes on main that have not reached a release branch.
+# Logic lives in .github/scripts/backport-audit.sh so it can be run locally and
+# reused by the release gate.
+
+on:
+  schedule:
+    - cron: '0 5 * * 1-5'
+  # A merge is what creates drift, and this way the audit cannot silently stop:
+  # GitHub disables 'schedule' after 60 days of repo inactivity.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: backport-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Compare release branches against main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find commits on main that are missing downstream
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          report=$(mktemp)
+
+          .github/scripts/backport-audit.sh | tee "$report" >> "$GITHUB_STEP_SUMMARY"
+
+          if grep -q '^  - ' "$report"; then
+            echo "gaps=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gaps=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo 'report<<REPORT_EOF'
+            cat "$report"
+            echo 'REPORT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue when fixes are missing
+        if: steps.audit.outputs.gaps == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.audit.outputs.report }}
+        run: |
+          set -euo pipefail
+          title="Backport audit: fixes missing from release branches"
+
+          # gh issue create fails outright if the label does not exist yet.
+          gh label create backport-audit --color ededed \
+            --description "Opened by the backport audit" >/dev/null 2>&1 || true
+
+          existing=$(gh issue list </dev/null --state open --label backport-audit \
+                       --json number --jq '.[0].number' || true)
+
+          body="These commits are on \`main\` but have no equivalent patch on the
+          release branch listed. Either backport them, merge the open backport
+          PR noted beside them, or mark them \`no-backport\` with a reason.
+
+          Last checked: $(date -u '+%Y-%m-%d %H:%M UTC') ([run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID))
+
+          $REPORT"
+
+          # Replace the body, not append a comment: this runs on every merge.
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label backport-audit
+          fi
