@@ -2,3 +2,4 @@ version: 4.8.0-dev-repatched
 feature-a: on
 feature-b: off
 checkout-fix
+pricing-rounding-fix
