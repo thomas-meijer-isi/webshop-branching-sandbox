@@ -137,7 +137,15 @@ jobs:
               # to be missing from release branches.
               case "$subject" in
                 fix*|Fix*|hotfix*|"revert"*) ;;
-                *) continue ;;
+                *)
+                  # Unless the author said otherwise. A backport/* label naming
+                  # this branch is an explicit decision that the change belongs
+                  # here, and it outranks a guess made from the subject wording:
+                  # 'Bugfix for 4.6' is a fix, and a feature can be deliberately
+                  # backported. $targets is non-empty only when it matches this
+                  # branch -- labels for other branches already skipped above.
+                  [ -n "$targets" ] || continue
+                  ;;
               esac
 
               # Flag an in-flight backport as in-flight. Reset per iteration --
