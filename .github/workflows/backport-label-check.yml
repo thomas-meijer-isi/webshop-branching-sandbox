@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # Default depth: git ls-remote queries the remote, it needs no history.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check for a backport decision label
         env:
