@@ -1,0 +1,203 @@
+name: Backport audit
+
+# Answers "did every fix reach every supported version?" by comparing patch
+# CONTENT, not commit hashes -- so a cherry-pick counts as present even though
+# its SHA differs.
+#
+# The label check says what SHOULD happen. This says what DID.
+
+on:
+  schedule:
+    - cron: '0 5 * * 1-5'   # weekday mornings, before standup
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read   # reading the backport decision off the originating PR
+
+jobs:
+  audit:
+    name: Compare release branches against main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find commits on main that are missing downstream
+        id: audit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          report=$(mktemp)
+
+          # The step summary renders Markdown but does not autolink bare SHAs or
+          # '#123' the way an issue body does, so write the links out in full.
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          for ref in $(git branch -r | grep -E 'origin/release/' | sed 's#\s*origin/##'); do
+            echo "## $ref" >> "$report"
+
+            # Source commits already cherry-picked onto this branch, read
+            # from the '(cherry picked from commit <sha>)' trailers that
+            # 'git cherry-pick -x' writes and a squash merge preserves.
+            #
+            # Patch-id alone is not enough. git cherry compares patch CONTENT,
+            # but squashing on main and squashing the backport PR produce
+            # different patches for the same change, so every backport looked
+            # missing -- on a repo that mandates squash merges this reported
+            # almost every commit, every run, and nobody reads a report like
+            # that.
+            picked=$(git log "origin/$ref" --format='%B' \
+                       | grep -oiE 'cherry picked from commit [0-9a-f]{7,40}' \
+                       | awk '{print tolower($NF)}' | sort -u || true)
+
+            # Source PRs whose backport already merged into this branch.
+            # backport.yml names the branch backport/<target>/<pr>, so a merged
+            # PR from that branch is conclusive proof the change landed.
+            #
+            # Needed because a pick that CONFLICTED carries no trailer at all:
+            # the action commits those as BACKPORT-CONFLICT without -x, so the
+            # trailer match above cannot see them and they report as missing
+            # forever.
+            picked_prs=$(gh pr list --state merged --base "$ref" --limit 200 \
+                           --json headRefName --jq '.[].headRefName' </dev/null \
+                         | sed -n "s#^backport/${ref}/##p" | sort -u || true)
+
+            # Backport PRs still open for this branch. These commits stay in the
+            # report -- an open PR means the fix has NOT reached this branch --
+            # but the action is "merge #N", not "backport this", and a report
+            # that cannot tell those apart is a report nobody acts on.
+            open_prs=$(gh pr list --state open --base "$ref" --limit 200 \
+                         --json number,headRefName \
+                         --jq '.[] | "\(.headRefName) \(.number)"' </dev/null \
+                       | sed -n "s#^backport/${ref}/##p" | sort -u || true)
+
+            # '+' = present on main, no equivalent patch on the release branch.
+            missing=$(git cherry "origin/$ref" origin/main | grep '^+' | cut -d' ' -f2 || true)
+
+            if [ -z "$missing" ]; then
+              echo "  (nothing missing)" >> "$report"
+              echo >> "$report"
+              continue
+            fi
+
+            count=0
+            while read -r sha; do
+              [ -z "$sha" ] && continue
+
+              subject=$(git log -1 --format='%s' "$sha")
+
+              # Already backported: a trailer on the release branch names
+              # this commit as its source. 12 hex chars is well clear of
+              # collisions at any size this audit runs against.
+              if [ -n "$picked" ] \
+                 && printf '%s\n' "$picked" | grep -qi "^${sha:0:12}"; then
+                continue
+              fi
+
+              # Skip anything explicitly marked as not for backporting. The
+              # label lives on the pull request, not in the commit body, so the
+              # body grep below has never matched a no-backport decision once.
+              # </dev/null stops gh eating the while-read loop's stdin.
+              pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" \
+                     --jq '.[0].number' </dev/null 2>/dev/null || true)
+              labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" \
+                         --jq '.[].labels[].name' </dev/null 2>/dev/null || true)
+
+              # Its backport PR merged, even if the pick was too messy to leave
+              # a trailer behind.
+              if [ -n "$pr" ] && [ -n "$picked_prs" ] \
+                 && printf '%s\n' "$picked_prs" | grep -qx "$pr"; then
+                continue
+              fi
+              if printf '%s\n' "$labels" | grep -qx 'no-backport'; then
+                continue
+              fi
+
+              # Honour the decision the PR recorded. A fix labelled for 4.7 only
+              # is not "missing" from 4.6 -- it was never sent there, and saying
+              # otherwise buries the commits that really were dropped.
+              #
+              # Safe because backport-label-check.yml makes a decision mandatory
+              # on every PR into main: a commit with no backport/* label at all
+              # still gets reported here rather than skipped.
+              targets=$(printf '%s\n' "$labels" | grep '^backport/' || true)
+              if [ -n "$targets" ] \
+                 && ! printf '%s\n' "$targets" | grep -qx "backport/${ref#release/}"; then
+                continue
+              fi
+              if git log -1 --format='%B' "$sha" | grep -qi 'no-backport'; then
+                continue
+              fi
+
+              # Only report things that look like fixes; features are expected
+              # to be missing from release branches.
+              case "$subject" in
+                fix*|Fix*|hotfix*|"revert"*) ;;
+                *)
+                  # Unless the author said otherwise. A backport/* label naming
+                  # this branch is an explicit decision that the change belongs
+                  # here, and it outranks a guess made from the subject wording:
+                  # 'Bugfix for 4.6' is a fix, and a feature can be deliberately
+                  # backported. $targets is non-empty only when it matches this
+                  # branch -- labels for other branches already skipped above.
+                  [ -n "$targets" ] || continue
+                  ;;
+              esac
+
+              # Flag an in-flight backport as in-flight. Reset per iteration --
+              # without this the note leaks onto the next commit reported.
+              note=""
+              if [ -n "$pr" ] && [ -n "$open_prs" ]; then
+                bp=$(printf '%s\n' "$open_prs" | awk -v p="$pr" '$1 == p {print $2}')
+                [ -n "$bp" ] && note="  <- backport PR [#$bp]($repo_url/pull/$bp) open, not merged"
+              fi
+
+              echo "  - [\`${sha:0:8}\`]($repo_url/commit/$sha) $subject$note" >> "$report"
+              count=$((count + 1))
+            done <<< "$missing"
+
+            [ "$count" -eq 0 ] && echo "  (nothing missing)" >> "$report"
+            echo >> "$report"
+          done
+
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+          if grep -q '^  - ' "$report"; then
+            echo "gaps=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gaps=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo 'report<<REPORT_EOF'
+            cat "$report"
+            echo 'REPORT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue when fixes are missing
+        if: steps.audit.outputs.gaps == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ steps.audit.outputs.report }}
+        run: |
+          set -euo pipefail
+          title="Backport audit: fixes missing from release branches"
+
+          existing=$(gh issue list </dev/null --state open --label backport-audit \
+                       --json number --jq '.[0].number' || true)
+
+          body="These commits are on \`main\` but have no equivalent patch on the
+          release branch listed. Either backport them, merge the open backport
+          PR noted beside them, or mark them \`no-backport\` with a reason.
+
+          $REPORT"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label backport-audit
+          fi
