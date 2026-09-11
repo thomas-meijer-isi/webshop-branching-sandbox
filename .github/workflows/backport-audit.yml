@@ -50,6 +50,18 @@ jobs:
                        | grep -oiE 'cherry picked from commit [0-9a-f]{7,40}' \
                        | awk '{print tolower($NF)}' | sort -u || true)
 
+            # Source PRs whose backport already merged into this branch.
+            # backport.yml names the branch backport/<target>/<pr>, so a merged
+            # PR from that branch is conclusive proof the change landed.
+            #
+            # Needed because a pick that CONFLICTED carries no trailer at all:
+            # the action commits those as BACKPORT-CONFLICT without -x, so the
+            # trailer match above cannot see them and they report as missing
+            # forever.
+            picked_prs=$(gh pr list --state merged --base "$ref" --limit 200 \
+                           --json headRefName --jq '.[].headRefName' </dev/null \
+                         | sed -n "s#^backport/${ref}/##p" | sort -u || true)
+
             # '+' = present on main, no equivalent patch on the release branch.
             missing=$(git cherry "origin/$ref" origin/main | grep '^+' | cut -d' ' -f2 || true)
 
@@ -77,8 +89,17 @@ jobs:
               # label lives on the pull request, not in the commit body, so the
               # body grep below has never matched a no-backport decision once.
               # </dev/null stops gh eating the while-read loop's stdin.
+              pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" \
+                     --jq '.[0].number' </dev/null 2>/dev/null || true)
               labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" \
                          --jq '.[].labels[].name' </dev/null 2>/dev/null || true)
+
+              # Its backport PR merged, even if the pick was too messy to leave
+              # a trailer behind.
+              if [ -n "$pr" ] && [ -n "$picked_prs" ] \
+                 && printf '%s\n' "$picked_prs" | grep -qx "$pr"; then
+                continue
+              fi
               if printf '%s\n' "$labels" | grep -qx 'no-backport'; then
                 continue
               fi
