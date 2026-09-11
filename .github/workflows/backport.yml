@@ -83,10 +83,29 @@ jobs:
             - [ ] A clean cherry-pick is not proof of correctness -- check the
                   surrounding code behaves the same way on this version
 
-            If this cannot be cherry-picked sensibly, close this PR and write the
-            fix directly against `${target_branch}` as its own PR. That is allowed.
-            What is *not* allowed is leaving the version unfixed because the pick
-            was awkward.
+            **If this PR is a draft, the cherry-pick conflicted.** The bot's comment
+            below stops after `git cherry-pick`, which leaves you mid-pick. The
+            full sequence is:
+
+            ```bash
+            git mergetool                  # or resolve the files by hand
+            git cherry-pick --continue
+            git push --force-with-lease    # the bot's `git reset --hard HEAD^` rewrote this branch
+            ```
+
+            Force-pushing is expected here and only ever touches this throwaway
+            backport branch. Use `--force-with-lease`, not `--force`, so the push is
+            refused if someone else pushed in the meantime.
+
+            Merge this with **squash**, like every other PR. The squashed commit is
+            attributed to the bot that opened this PR; the original author is
+            recorded in the commit message and the `(cherry picked from commit ...)`
+            trailer.
+
+            If this cannot be cherry-picked sensibly, close this PR and write the fix
+            directly against the release branch as its own PR. That is allowed. What
+            is *not* allowed is leaving the version unfixed because the pick was
+            awkward.
           copy_assignees: true
           copy_milestone: false
           add_author_as_assignee: true
