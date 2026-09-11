@@ -1,4 +1,5 @@
 version: 4.6.0
 feature-a: on
 feature-b: off
+checkout-fix
 legacy-fix
