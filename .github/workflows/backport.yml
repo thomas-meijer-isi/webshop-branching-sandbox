@@ -2,34 +2,33 @@ name: Backport merged PR
 
 # On merge, open one cherry-pick PR per "backport/<version>" label.
 # On conflict the PR is opened anyway, with markers and instructions.
-#
-# Labels are named after the version ("backport/v4.6"), not the branch
-# ("release/v4.6"). The backport action feeds its label_pattern capture group
-# straight to git checkout, so it cannot do that translation itself -- there is
-# no mapping input. The "Map backport labels to release branches" step below
-# does it explicitly and passes the result via target_branches. label_pattern is
-# deliberately set to a regex that matches nothing, so labels contribute no
-# targets of their own.
 
 on:
   pull_request_target:
     types: [closed]
 
 permissions:
-  contents: write        # push the cherry-picked branch
-  pull-requests: write   # open the backport PR
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: backport-${{ github.event.pull_request.number }}
+  cancel-in-progress: false   # never abandon a pick half-pushed
 
 jobs:
   backport:
     name: Create backport PRs
     runs-on: ubuntu-latest
-    # Only merged PRs that actually carry a backport/ label
+    timeout-minutes: 15
     if: >
       github.event.pull_request.merged &&
       contains(toJSON(github.event.pull_request.labels.*.name), '"backport/')
     steps:
       - uses: actions/checkout@v4
 
+      # Labels are named after the version, not the branch. The action feeds its
+      # label_pattern capture straight to git checkout and has no mapping input,
+      # so do it here and pass the result via target_branches.
       - name: Map backport labels to release branches
         id: targets
         env:
@@ -46,11 +45,9 @@ jobs:
               *) continue ;;
             esac
 
-            # backport/v4.6 -> release/v4.6
             branch="release/${l#backport/}"
 
-            # Refuse to guess. A label pointing at a branch that does not exist
-            # is a naming mistake, and silently skipping it would look identical
+            # Refuse to guess: silently skipping a typo'd label looks identical
             # to a deliberate decision not to backport.
             if ! git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
               echo "::error::Label '$l' maps to branch '$branch', which does not exist."
@@ -69,7 +66,9 @@ jobs:
           echo "branches=${targets[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Create backport pull requests
-        uses: korthout/backport-action@v4
+        # Pinned to a commit: this third-party action holds contents:write and
+        # pull-requests:write, and a version tag is mutable. Dependabot bumps it.
+        uses: korthout/backport-action@2e830a1d0b8269505846ddd407a70876913ad1f8  # v4.6.0
         with:
           # Matches nothing on purpose -- targets come from the mapping step.
           label_pattern: '^backport-never-matches/(?<target>.+)$'
@@ -109,10 +108,9 @@ jobs:
           copy_assignees: true
           copy_milestone: false
           add_author_as_assignee: true
-          # Default ("fail") aborts the cherry-pick on conflict and only leaves a
-          # comment, so a supported version can go quietly unfixed. Commit the
-          # conflict markers and open a draft PR instead -- the "No conflict
-          # markers" check on release/** is what stops it being merged as-is.
+          # Default ("fail") only leaves a comment, so a supported version can go
+          # quietly unfixed. Commit the markers instead; the "No conflict markers"
+          # check on release/** is what stops it being merged as-is.
           experimental: >
             {
               "conflict_resolution": "draft_commit_conflicts"

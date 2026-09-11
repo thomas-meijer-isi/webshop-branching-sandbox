@@ -1,10 +1,8 @@
 name: Backport decision required
 
 # Every PR into main must declare where it goes: one or more backport/<version>
-# labels, or no-backport. The valid labels are derived from the release branches
-# that actually exist, so they never go stale: release/v4.6 -> backport/v4.6.
-#
-# backport.yml maps the label back to the branch. Keep the two in step.
+# labels, or no-backport. Accepted labels are derived from the release branches
+# that exist, so they never go stale. backport.yml maps them back.
 
 on:
   pull_request:
@@ -14,14 +12,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: backport-label-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   require-decision:
     name: Backport decision
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      # Default depth: git ls-remote queries the remote, it needs no history.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Check for a backport decision label
         env:
@@ -29,7 +31,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Release branches that exist right now -> the labels we accept
           mapfile -t open_branches < <(
             git ls-remote --heads origin 'release/*' \
               | sed 's#.*refs/heads/release/#backport/#' \
@@ -64,7 +65,6 @@ jobs:
             exit 1
           fi
 
-          # no-backport is exclusive: it cannot be combined with a target
           if printf '%s\n' "${picked[@]}" | grep -qx 'no-backport' \
              && [ ${#picked[@]} -gt 1 ]; then
             echo "::error::'no-backport' cannot be combined with a backport/* label."
