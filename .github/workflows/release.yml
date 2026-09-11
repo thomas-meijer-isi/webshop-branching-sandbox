@@ -38,10 +38,10 @@ jobs:
             *) echo "::error::'$REF' is not a release branch."; exit 1 ;;
           esac
 
-          # 4.7.3 must be tagged from release/4.7
+          # 4.7.3 must be tagged from release/v4.7
           minor="${VERSION%.*}"
-          if [ "$REF" != "release/$minor" ]; then
-            echo "::error::Version $VERSION does not belong on $REF (expected release/$minor)."
+          if [ "$REF" != "release/v$minor" ]; then
+            echo "::error::Version $VERSION does not belong on $REF (expected release/v$minor)."
             exit 1
           fi
 
