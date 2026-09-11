@@ -3,3 +3,4 @@ feature-a: on
 feature-b: off
 checkout-fix
 legacy-fix
+cart-quantity-fix
