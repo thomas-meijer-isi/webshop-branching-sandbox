@@ -2,3 +2,4 @@ version: 4.7.0
 feature-a: on
 feature-b: off
 checkout-fix
+pricing-rounding-fix
