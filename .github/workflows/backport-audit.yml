@@ -33,6 +33,10 @@ jobs:
           set -euo pipefail
           report=$(mktemp)
 
+          # The step summary renders Markdown but does not autolink bare SHAs or
+          # '#123' the way an issue body does, so write the links out in full.
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
           for ref in $(git branch -r | grep -E 'origin/release/' | sed 's#\s*origin/##'); do
             echo "## $ref" >> "$report"
 
@@ -141,10 +145,10 @@ jobs:
               note=""
               if [ -n "$pr" ] && [ -n "$open_prs" ]; then
                 bp=$(printf '%s\n' "$open_prs" | awk -v p="$pr" '$1 == p {print $2}')
-                [ -n "$bp" ] && note="  <- backport PR #$bp open, not merged"
+                [ -n "$bp" ] && note="  <- backport PR [#$bp]($repo_url/pull/$bp) open, not merged"
               fi
 
-              echo "  - ${sha:0:8} $subject$note" >> "$report"
+              echo "  - [\`${sha:0:8}\`]($repo_url/commit/$sha) $subject$note" >> "$report"
               count=$((count + 1))
             done <<< "$missing"
 
