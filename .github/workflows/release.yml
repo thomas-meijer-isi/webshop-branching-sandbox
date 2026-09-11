@@ -45,9 +45,13 @@ jobs:
             exit 1
           fi
 
+          # Match on the head branch, not on a label. The backport action does not
+          # label the PRs it opens, so the label test silently matched nothing and
+          # the gate passed with backports still open. A branch name is also harder
+          # to remove by accident than a label.
           open=$(gh pr list --base "$REF" --state open \
-                   --json number,title,labels \
-                   --jq '.[] | select(.labels[].name | startswith("backport"))
+                   --json number,title,headRefName \
+                   --jq '.[] | select(.headRefName | startswith("backport/"))
                          | "#\(.number) \(.title)"' || true)
 
           if [ -n "$open" ]; then
