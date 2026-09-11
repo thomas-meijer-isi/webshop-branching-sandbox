@@ -1,3 +1,4 @@
 version: 4.8.0-dev
 feature-a: on
 feature-b: off
+checkout-fix
