@@ -90,3 +90,11 @@ jobs:
           copy_assignees: true
           copy_milestone: false
           add_author_as_assignee: true
+          # Default ("fail") aborts the cherry-pick on conflict and only leaves a
+          # comment, so a supported version can go quietly unfixed. Commit the
+          # conflict markers and open a draft PR instead -- the "No conflict
+          # markers" check on release/** is what stops it being merged as-is.
+          experimental: >
+            {
+              "conflict_resolution": "draft_commit_conflicts"
+            }
