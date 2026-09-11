@@ -24,7 +24,7 @@ jobs:
       github.event.pull_request.merged &&
       contains(toJSON(github.event.pull_request.labels.*.name), '"backport/')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Labels are named after the version, not the branch. The action feeds its
       # label_pattern capture straight to git checkout and has no mapping input,
