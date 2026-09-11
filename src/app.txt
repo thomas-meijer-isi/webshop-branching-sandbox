@@ -1,4 +1,10 @@
 version: 4.6.0
 feature-a: on
 feature-b: off
+<<<<<<< HEAD
 legacy-fix
+=======
+checkout-fix
+pricing-rounding-fix
+cart-quantity-fix
+>>>>>>> 45f8241 (fix: cart quantity resets on refresh (#28))
