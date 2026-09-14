@@ -1,0 +1,117 @@
+name: Backport merged PR
+
+# On merge, open one cherry-pick PR per "backport/<version>" label.
+# On conflict the PR is opened anyway, with markers and instructions.
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: backport-${{ github.event.pull_request.number }}
+  cancel-in-progress: false   # never abandon a pick half-pushed
+
+jobs:
+  backport:
+    name: Create backport PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >
+      github.event.pull_request.merged &&
+      contains(toJSON(github.event.pull_request.labels.*.name), '"backport/')
+    steps:
+      - uses: actions/checkout@v4
+
+      # Labels are named after the version, not the branch. The action feeds its
+      # label_pattern capture straight to git checkout and has no mapping input,
+      # so do it here and pass the result via target_branches.
+      - name: Map backport labels to release branches
+        id: targets
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+
+          targets=()
+          IFS=',' read -ra applied <<< "${LABELS:-}"
+
+          for l in "${applied[@]}"; do
+            case "$l" in
+              backport/*) ;;
+              *) continue ;;
+            esac
+
+            branch="release/${l#backport/}"
+
+            # Refuse to guess: silently skipping a typo'd label looks identical
+            # to a deliberate decision not to backport.
+            if ! git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              echo "::error::Label '$l' maps to branch '$branch', which does not exist."
+              exit 1
+            fi
+
+            targets+=("$branch")
+          done
+
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo "::error::No backport/* label resolved to a release branch."
+            exit 1
+          fi
+
+          echo "Targets: ${targets[*]}"
+          echo "branches=${targets[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Create backport pull requests
+        # Pinned to a commit: this third-party action holds contents:write and
+        # pull-requests:write, and a version tag is mutable. Dependabot bumps it.
+        uses: korthout/backport-action@2e830a1d0b8269505846ddd407a70876913ad1f8  # v4.6.0
+        with:
+          # Matches nothing on purpose -- targets come from the mapping step.
+          label_pattern: '^backport-never-matches/(?<target>.+)$'
+          target_branches: ${{ steps.targets.outputs.branches }}
+          branch_name: backport/${target_branch}/${pull_number}
+          pull_title: '[${target_branch}] ${pull_title}'
+          pull_description: |
+            Automated cherry-pick of #${pull_number} onto `${target_branch}`.
+
+            **Before merging**
+            - [ ] A clean cherry-pick is not proof of correctness -- check the
+                  surrounding code behaves the same way on this version
+
+            **If this PR is a draft, the cherry-pick conflicted.** The bot's comment
+            below stops after `git cherry-pick`, which leaves you mid-pick. The
+            full sequence is:
+
+            ```bash
+            git mergetool                  # or resolve the files by hand
+            git cherry-pick --continue
+            git push --force-with-lease    # the bot's `git reset --hard HEAD^` rewrote this branch
+            ```
+
+            Force-pushing is expected here and only ever touches this throwaway
+            backport branch. Use `--force-with-lease`, not `--force`, so the push is
+            refused if someone else pushed in the meantime.
+
+            Merge this with **squash**, like every other PR. The squashed commit is
+            attributed to the bot that opened this PR; the original author is
+            recorded in the commit message and the `(cherry picked from commit ...)`
+            trailer.
+
+            If this cannot be cherry-picked sensibly, close this PR and write the fix
+            directly against the release branch as its own PR. That is allowed. What
+            is *not* allowed is leaving the version unfixed because the pick was
+            awkward.
+          copy_assignees: true
+          copy_milestone: false
+          add_author_as_assignee: true
+          # Default ("fail") only leaves a comment, so a supported version can go
+          # quietly unfixed. Commit the markers instead; the "No conflict markers"
+          # check on release/** is what stops it being merged as-is.
+          experimental: >
+            {
+              "conflict_resolution": "draft_commit_conflicts"
+            }

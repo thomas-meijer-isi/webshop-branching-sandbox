@@ -1,8 +1,12 @@
 name: Release
 
-# Tag a version from a release branch. Refuses to run if a backport PR for that
-# branch is still open -- shipping a version you know is missing a fix should
-# stop the release, not produce a warning nobody reads.
+# Tag a version from a release branch. Refuses to run if that branch is missing
+# a fix main has -- shipping a version you know is incomplete should stop the
+# release, not produce a warning nobody reads.
+#
+# Two checks: an open backport PR is only one way a fix goes missing. One closed
+# without merging, or never opened, leaves no PR to find, so the second check
+# runs the nightly audit scoped to this branch.
 
 on:
   workflow_dispatch:
@@ -16,17 +20,26 @@ permissions:
   contents: write
   pull-requests: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # queue; a half-run release is worse than a slow one
+
 jobs:
   gate:
     name: Release gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       branch: ${{ steps.check.outputs.branch }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Refuse if backports for this branch are still open
         id: check
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REF: ${{ github.ref_name }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -38,22 +51,16 @@ jobs:
             *) echo "::error::'$REF' is not a release branch."; exit 1 ;;
           esac
 
-          # 4.7.3 must be tagged from release/v4.7
-          minor="${VERSION%.*}"
-          if [ "$REF" != "release/v$minor" ]; then
-            echo "::error::Version $VERSION does not belong on $REF (expected release/v$minor)."
+          # Release branches are cut per major.minor, so 4.7.3 belongs on release/v4.7.
+          series="${VERSION%.*}"
+          if [ "$REF" != "release/v$series" ]; then
+            echo "::error::Version $VERSION does not belong on $REF (expected release/v$series)."
             exit 1
           fi
 
-          # Match on the head branch, not on a label. The backport action does not
-          # label the PRs it opens, so the label test silently matched nothing and
-          # the gate passed with backports still open. A branch name is also harder
-          # to remove by accident than a label.
-          # -R is required: this job does not check out the repository, so gh has
-          # no git remote to infer it from. Without it the command fails and, if
-          # its error is swallowed, the gate reports "no open backports" and
-          # clears the release. No '|| true' here for the same reason -- a query
-          # that cannot run must block the release, not wave it through.
+          # Match on the head branch: the action does not label the PRs it opens,
+          # so a label test silently matches nothing and the gate passes. No
+          # '|| true' anywhere here -- a query that cannot run must block.
           open=$(gh pr list -R "$GITHUB_REPOSITORY" --base "$REF" --state open \
                    --json number,title,headRefName \
                    --jq '.[] | select(.headRefName | startswith("backport/"))
@@ -76,12 +83,39 @@ jobs:
           fi
 
           echo "branch=$REF" >> "$GITHUB_OUTPUT"
-          echo "No open backports. Clear to tag $VERSION."
+          echo "No open backports targeting $REF."
+
+      - name: Refuse if main has fixes this branch never received
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          report=$(mktemp)
+          .github/scripts/backport-audit.sh "$REF" | tee "$report" >> "$GITHUB_STEP_SUMMARY"
+
+          if grep -q '^  - ' "$report"; then
+            {
+              echo "### Release blocked"
+              echo
+              echo "\`$REF\` is missing fixes that are on \`main\` (listed above)."
+              echo
+              echo "Backport them, or label them \`no-backport\` with a reason,"
+              echo "before tagging $VERSION."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$REF is missing backports. See the job summary."
+            exit 1
+          fi
+
+          echo "No missing backports. Clear to tag $VERSION."
 
   tag:
     name: Tag and publish
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -90,6 +124,10 @@ jobs:
       - name: Create the annotated tag
         env:
           VERSION: ${{ inputs.version }}
+          # Via env, not '${{ }}' inline: an expression is substituted into the
+          # shell source before parsing, and branch names may contain quotes,
+          # backticks and '$'.
+          REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
@@ -100,21 +138,22 @@ jobs:
             exit 1
           fi
 
-          git tag -a "v$VERSION" -m "Release v$VERSION from ${{ github.ref_name }}"
+          git tag -a "v$VERSION" -m "Release v$VERSION from $REF"
           git push origin "v$VERSION"
 
-      # Build your artifact here, then attach it. Release assets do not expire;
-      # Actions artifacts do (90 days). For a per-install product the archived
-      # installer is often worth more than the ability to rebuild it later.
+      # Attach the artifact here. Release assets do not expire; Actions
+      # artifacts do (90 days).
       - name: Build
         run: echo "replace with the real build"
 
       - name: Publish the GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
+          REF: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
           gh release create "v$VERSION" \
             --title "v$VERSION" \
             --generate-notes \
-            --target "${{ github.ref_name }}"
+            --target "$REF"
